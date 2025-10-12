@@ -27,7 +27,7 @@ with st.sidebar:
 st.title("Prototipo")
 st.write(f"Modelos a configurar: {st.session_state.num_modelos}")
 
-set.markdown("## Cargar Dataset")
+set.header("Cargar Dataset")
 # file with data to proccess
 uploaded_file = st.file_uploader("Choose a file", type=["csv", "xlsx"])
 if uploaded_file is not None:
