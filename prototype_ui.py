@@ -1,4 +1,5 @@
 import streamlit as st
+import numpy as np
 
 with st.container():
     st.write("This is inside the container")
