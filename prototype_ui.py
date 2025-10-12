@@ -1,8 +1,13 @@
 import streamlit as st
+import pandas as pd
+from io import StringIO
 
 # Inicializar
 if "num_modelos" not in st.session_state:
     st.session_state.num_modelos = 1
+
+if 'input_dataset' not in st.session_state:
+    st.session_state.input_dataset = None
 
 def actualizar_num_modelos():
     st.session_state.num_modelos = st.session_state.input_num_modelos
@@ -21,6 +26,22 @@ with st.sidebar:
 
 st.title("Prototipo")
 st.write(f"Modelos configurados: {st.session_state.num_modelos}")
+
+# file with data to proccess
+uploaded_file = st.file_uploader("Choose a file", type=["csv", "xlsx"])
+if uploaded_file is not None:
+    # Can be used wherever a "file-like" object is accepted:
+    if uploaded_file.type == "text/csv":
+        dataframe = pd.read_csv(uploaded_file)
+    elif uploaded_file.type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+        dataframe = pd.read_excel(uploaded_file)
+    else:
+        st.error("Unsupported file type. Please upload a CSV or Excel file.")
+        dataframe = None
+    dataframe = pd.read_csv(uploaded_file)
+    st.session_state.input_dataset = dataframe
+    st.dataframe(dataframe)
+
 
 tabs_title = [f"Modelo {i+1}" for i in range(st.session_state.num_modelos)]
 tabs = st.tabs(tabs_title)
