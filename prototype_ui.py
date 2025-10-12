@@ -38,8 +38,8 @@ if uploaded_file is not None:
     else:
         st.error("Unsupported file type. Please upload a CSV or Excel file.")
         dataframe = None
-    dataframe = pd.read_csv(uploaded_file)
-    st.session_state.input_dataset = dataframe
+st.session_state.input_dataset = dataframe
+if dataframe is not None:
     st.dataframe(dataframe)
 
 
