@@ -25,8 +25,9 @@ with st.sidebar:
     )
 
 st.title("Prototipo")
-st.write(f"Modelos configurados: {st.session_state.num_modelos}")
+st.write(f"Modelos a configurar: {st.session_state.num_modelos}")
 
+set.markdown("## Cargar Dataset")
 # file with data to proccess
 uploaded_file = st.file_uploader("Choose a file", type=["csv", "xlsx"])
 if uploaded_file is not None:
@@ -39,8 +40,8 @@ if uploaded_file is not None:
         st.error("Unsupported file type. Please upload a CSV or Excel file.")
         dataframe = None
 st.session_state.input_dataset = dataframe
-if dataframe is not None:
-    st.dataframe(dataframe)
+if st.session_state.input_dataset is not None:
+    st.dataframe(st.session_state.input_dataset)
 
 
 tabs_title = [f"Modelo {i+1}" for i in range(st.session_state.num_modelos)]
