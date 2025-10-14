@@ -16,9 +16,9 @@ st.session_state.models = []
 def actualizar_num_modelos():
     st.session_state.num_modelos = st.session_state.input_num_modelos
 
-def model_factory(model_type)-> Model| None:
+def model_factory(model_type, tab_index = None)-> Model| None:
     if model_type == "DeepSurv":
-        return DeepSurvModel()
+        return DeepSurvModel(tab_index=tab_index)
     elif model_type == "Lifelines-PHCox":
         return LifelinesCoxPHModel()
     elif model_type == "CoxCC":
@@ -69,37 +69,72 @@ if uploaded_file is not None:
 if st.session_state.input_dataset is not None:
     st.dataframe(st.session_state.input_dataset)
 
-# Configuracion de los modelos
+# Configuración de los modelos
 st.markdown("## Configuración de Modelos")
+
+# Aseguramos que st.session_state.models tenga la longitud correcta
+if len(st.session_state.models) != st.session_state.num_modelos:
+    # Extender o recortar la lista de modelos
+    current_len = len(st.session_state.models)
+    target_len = st.session_state.num_modelos
+    if target_len > current_len:
+        # Añadir nuevos modelos (None por ahora)
+        st.session_state.models.extend([None] * (target_len - current_len))
+    elif target_len < current_len:
+        # Recortar
+        st.session_state.models = st.session_state.models[:target_len]
+
 tabs_title = [f"Modelo {i+1}" for i in range(st.session_state.num_modelos)]
 tabs = st.tabs(tabs_title)
+
 for i, tab in enumerate(tabs):
     with tab:
         st.markdown(f"### Configuración del Modelo {i+1}")
-        model_name = st.text_input(f"Nombre del Modelo {i+1}", key=f"model_name_{i}")
+        
+        # Leer o crear el modelo para esta pestaña
+        current_model = st.session_state.models[i]
+        
+        model_name = st.text_input(f"Nombre del Modelo {i+1}", value=current_model.name if current_model else "", key=f"model_name_{i}")
         model_type = st.selectbox(
             f"Tipo de Modelo {i+1}",
             model_types,
+            index=model_types.index(current_model.type) if current_model and current_model.type in model_types else 0,
             key=f"model_type_{i}"
         )
-        model = model_factory(model_type)
+
+        # Si el tipo cambió o no hay modelo, crear uno nuevo
+        if current_model is None or current_model.type != model_type:
+            new_model = model_factory(model_type,tab_index=i)
+            if new_model:
+                new_model.set_name(model_name)
+                st.session_state.models[i] = new_model
+            else:
+                st.session_state.models[i] = None
+                st.warning("Modelo no soportado.")
+                continue
+        else:
+            # Actualizar nombre si cambió
+            current_model.set_name(model_name)
+            st.session_state.models[i] = current_model
+
+        model = st.session_state.models[i]
         if model is not None:
-            model.set_name(model_name)
             if st.session_state.input_dataset is not None:
                 model.set_input_df(st.session_state.input_dataset)
             model.show_ui()
-        st.session_state.models.append(model)
-        st.write("Detalles del modelo:")
-        if model is not None:
+            st.write("Detalles del modelo:")
             model.model_details()
-        
+
         st.markdown("---")
         st.markdown("### Model prediction")
-        if st.button(f"Predict Model {i+1}") and model is not None and st.session_state.input_dataset is not None:
+        if st.button(f"Predict Model {i+1}", key=f"predict_btn_{i}") and model is not None and st.session_state.input_dataset is not None:
             df_pred = model.predict(st.session_state.input_dataset)
             st.markdown(f"**{model.name}-{model.type}** prediction:")
             st.dataframe(df_pred)
-
+            st.pyplot(model.get_survival_curve())
+            df_median_time = model.predict_median_survival_time(st.session_state.input_dataset)
+            if df_median_time is not None:
+                st.dataframe(df_median_time)
 
 st.markdown("## Realizar predicciones")
 
