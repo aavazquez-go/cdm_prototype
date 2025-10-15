@@ -1,0 +1,11 @@
+streamlit[charts]
+joblib
+scikit-learn
+pycox
+scipy
+lifelines
+torch
+matplotlib
+pandas
+numpy
+seaborn
