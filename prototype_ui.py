@@ -54,7 +54,7 @@ with st.sidebar:
 st.title("Prototipo CADM para predicción de insolvencia en PYMEs")
 st.write(f"Modelos a configurar: {st.session_state.num_modelos}")
 
-st.markdown("## Cargar Dataset")
+st.markdown("## Cargar dataset para predecir")
 
 # file with data to proccess
 uploaded_file = st.file_uploader("Choose a file", type=["csv", "xlsx"])
