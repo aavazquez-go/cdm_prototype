@@ -51,7 +51,7 @@ with st.sidebar:
         default=["Lifelines-CoxPH", "DeepSurv", "CoxCC", "CoxTime"]
     )
 
-st.title("Prototipo")
+st.title("Prototipo CADM para predicción de insolvencia en PYMEs")
 st.write(f"Modelos a configurar: {st.session_state.num_modelos}")
 
 st.markdown("## Cargar Dataset")
