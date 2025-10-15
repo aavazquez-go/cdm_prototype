@@ -10,6 +10,10 @@ if "num_modelos" not in st.session_state:
 if 'input_dataset' not in st.session_state:
     st.session_state.input_dataset = None
 
+# Inicializar resultados de predicción por modelo
+if 'prediction_results' not in st.session_state:
+    st.session_state.prediction_results = {}
+
 #if 'models' not in st.session_state:
 st.session_state.models = []
 
@@ -19,10 +23,10 @@ def actualizar_num_modelos():
 def model_factory(model_type, tab_index = None)-> Model| None:
     if model_type == "DeepSurv":
         return DeepSurvModel(tab_index=tab_index)
-    elif model_type == "Lifelines-PHCox":
-        return LifelinesCoxPHModel()
+    elif model_type == "Lifelines-CoxPH":
+        return LifelinesCoxPHModel(tab_index=tab_index)
     elif model_type == "CoxCC":
-        return CoxCCModel()
+        return CoxCCModel(tab_index=tab_index)
     elif model_type == "CoxTime":
         return CoxTimeModel()
     else:
@@ -44,8 +48,8 @@ with st.sidebar:
     st.markdown("### Modelos para usar")
     model_types = st.multiselect(
         "Selecciona los tipos de modelos a usar",
-        options=["Lifelines-PHCox", "DeepSurv", "CoxCC", "CoxTime"],
-        default=["Lifelines-PHCox", "DeepSurv", "CoxCC", "CoxTime"]
+        options=["Lifelines-CoxPH", "DeepSurv", "CoxCC", "CoxTime"],
+        default=["Lifelines-CoxPH", "DeepSurv", "CoxCC", "CoxTime"]
     )
 
 st.title("Prototipo")
@@ -127,14 +131,42 @@ for i, tab in enumerate(tabs):
 
         st.markdown("---")
         st.markdown("### Model prediction")
+        # if st.button(f"Predict Model {i+1}", key=f"predict_btn_{i}") and model is not None and st.session_state.input_dataset is not None:
+        #     df_pred = model.predict(st.session_state.input_dataset)
+        #     st.session_state
+        #     st.markdown(f"**{model.name}-{model.type}** prediction:")
+        #     st.dataframe(df_pred)
+        #     st.pyplot(model.get_survival_curve())
+        #     df_median_time = model.predict_median_survival_time()
+        #     if df_median_time is not None:
+        #         st.dataframe(df_median_time)
+        # Mostrar resultados anteriores si existen
+        if i in st.session_state.prediction_results:
+            res = st.session_state.prediction_results[i]
+            st.markdown(f"**{res['name']}-{res['type']}** prediction:")
+            st.dataframe(res['df_pred'])
+            st.pyplot(res['survival_curve'])
+            if res['df_median_time'] is not None:
+                st.dataframe(res['df_median_time'])
+
+        # Botón de predicción
         if st.button(f"Predict Model {i+1}", key=f"predict_btn_{i}") and model is not None and st.session_state.input_dataset is not None:
-            df_pred = model.predict(st.session_state.input_dataset)
-            st.markdown(f"**{model.name}-{model.type}** prediction:")
-            st.dataframe(df_pred)
-            st.pyplot(model.get_survival_curve())
-            df_median_time = model.predict_median_survival_time(st.session_state.input_dataset)
-            if df_median_time is not None:
-                st.dataframe(df_median_time)
+            try:
+                df_pred = model.predict(st.session_state.input_dataset)
+                survival_curve = model.get_survival_curve()
+                df_median_time = model.predict_median_survival_time()
+
+                # Guardar en session_state
+                st.session_state.prediction_results[i] = {
+                    'name': model.name,
+                    'type': model.type,
+                    'df_pred': df_pred,
+                    'survival_curve': survival_curve,
+                    'df_median_time': df_median_time
+                }
+                # Streamlit se re-ejecutará y mostrará el resultado arriba
+            except Exception as e:
+                st.error(f"Error al predecir con el modelo {model.name}: {e}")
 
 st.markdown("## Realizar predicciones")
 
