@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-from io import StringIO
 from settings import Model, DeepSurvModel, LifelinesCoxPHModel, CoxCCModel, CoxTimeModel
 
 # Inicializar

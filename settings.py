@@ -11,7 +11,12 @@ import torch
 import torchtuples as tt
 import joblib
 
-from pycox.datasets import metabric
+import os
+import tempfile
+
+# Redirigir la carpeta de datos de pycox a /tmp (escribible en Streamlit Cloud)
+os.environ["PYCOX_DATA_DIR"] = os.path.join(tempfile.gettempdir(), "pycox_data")
+
 from pycox.models import CoxPH, CoxCC
 from pycox.evaluation import EvalSurv
 
