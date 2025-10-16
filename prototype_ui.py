@@ -27,7 +27,7 @@ def model_factory(model_type, tab_index = None)-> Model| None:
     elif model_type == "CoxCC":
         return CoxCCModel(tab_index=tab_index)
     elif model_type == "CoxTime":
-        return CoxTimeModel()
+        return CoxTimeModel(tab_index=tab_index)
     else:
         return None
 
@@ -151,7 +151,7 @@ for i, tab in enumerate(tabs):
         # Botón de predicción
         if st.button(f"Predict Model {i+1}", key=f"predict_btn_{i}") and model is not None and st.session_state.input_dataset is not None:
             try:
-                df_pred = model.predict(st.session_state.input_dataset)
+                df_pred = model.predict()
                 survival_curve = model.get_survival_curve()
                 df_median_time = model.predict_median_survival_time()
 
