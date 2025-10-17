@@ -130,15 +130,7 @@ for i, tab in enumerate(tabs):
 
         st.markdown("---")
         st.markdown("### Model prediction")
-        # if st.button(f"Predict Model {i+1}", key=f"predict_btn_{i}") and model is not None and st.session_state.input_dataset is not None:
-        #     df_pred = model.predict(st.session_state.input_dataset)
-        #     st.session_state
-        #     st.markdown(f"**{model.name}-{model.type}** prediction:")
-        #     st.dataframe(df_pred)
-        #     st.pyplot(model.get_survival_curve())
-        #     df_median_time = model.predict_median_survival_time()
-        #     if df_median_time is not None:
-        #         st.dataframe(df_median_time)
+
         # Mostrar resultados anteriores si existen
         if i in st.session_state.prediction_results:
             res = st.session_state.prediction_results[i]
@@ -147,6 +139,7 @@ for i, tab in enumerate(tabs):
             st.pyplot(res['survival_curve'])
             if res['df_median_time'] is not None:
                 st.dataframe(res['df_median_time'])
+            st.write(f"Indice de Concordancia del modelo = {res['c_index']}")
 
         # Botón de predicción
         if st.button(f"Predict Model {i+1}", key=f"predict_btn_{i}") and model is not None and st.session_state.input_dataset is not None:
@@ -154,18 +147,20 @@ for i, tab in enumerate(tabs):
                 df_pred = model.predict()
                 survival_curve = model.get_survival_curve()
                 df_median_time = model.predict_median_survival_time()
-
+                c_index = model.concordance_index()
+                
                 # Guardar en session_state
                 st.session_state.prediction_results[i] = {
                     'name': model.name,
                     'type': model.type,
                     'df_pred': df_pred,
                     'survival_curve': survival_curve,
-                    'df_median_time': df_median_time
+                    'df_median_time': df_median_time,
+                    'c_index': c_index
                 }
                 # Streamlit se re-ejecutará y mostrará el resultado arriba
             except Exception as e:
-                st.error(f"Error al predecir con el modelo {model.name}: {e}")
+                st.error(f"Error al predecir con el modelo {model.name}: {e} with stacktrace {e.with_traceback}")
 
 st.markdown("## Realizar predicciones")
 

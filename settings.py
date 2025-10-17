@@ -6,7 +6,8 @@ from sklearn.preprocessing import StandardScaler
 import pandas as pd
 from pandas import DataFrame
 import pickle
-#from sklearn_pandas import DataFrameMapper
+from lifelines.utils import concordance_index
+
 
 import torch
 import torchtuples as tt
@@ -63,6 +64,10 @@ class Model(ABC):
     def predict_median_survival_time(self) -> DataFrame:
         pass
 
+    @abstractmethod
+    def concordance_index(self)-> float | None:
+        pass
+
 class DeepSurvModel(Model):
     instance_count = 0
     def __init__(self, tab_index = None):
@@ -82,17 +87,19 @@ class DeepSurvModel(Model):
         self.preprocessing_file = None
         self.state_dict_file = None
         self.baseline_hazards_file = None
+        self.evaluation_file = None
         self.surv_curve = None
         self.surv = None
         self.model = None
         self.model_loaded = None
         self.preprocessed_input = None
+        self.evaluation = None
     
     def show_ui(self):
         st.markdown("#### DeepSurv")
         # Preprocessing file
         preprocessing_file = st.file_uploader(
-            "Upload preprocessing model file", 
+            "Cargue el arhivo de preprocesamiento del modelo", 
             accept_multiple_files=False, 
             type="pkl", 
             key=f"deepsurv_preprocessing_file_uploader_{self.instance_id}"
@@ -106,7 +113,7 @@ class DeepSurvModel(Model):
 
         # State dict file
         state_dict_file = st.file_uploader(
-            "Upload PyTorch weight models", 
+            "Cargue el archivo de los pesos del modelo", 
             accept_multiple_files=False, 
             type="pt", 
             key=f"deepsurv_state_dict_file_uploader_{self.instance_id}"
@@ -117,7 +124,7 @@ class DeepSurvModel(Model):
 
         # Baseline hazards file
         baseline_hazards_file = st.file_uploader(
-            "Upload baseline hazards file", 
+            "Cargue el archivo de linea base de riesgos", 
             accept_multiple_files=False, 
             type="joblib", 
             key=f"deepsurv_baseline_hazards_file_uploader_{self.instance_id}"
@@ -125,20 +132,34 @@ class DeepSurvModel(Model):
         if baseline_hazards_file:
             st.session_state[f"{self.instance_id}_baseline_hazards_file"] = baseline_hazards_file
         self.baseline_hazards_file = st.session_state.get(f"{self.instance_id}_baseline_hazards_file", None)
+
+        # Evaluation file
+        evaluation_file = st.file_uploader(
+            "Cargue el archivo de evaluación del modelo", 
+            accept_multiple_files=False, 
+            type="joblib", 
+            key=f"deepsurv_evaluation_file_uploader_{self.instance_id}"
+        )
+        if evaluation_file:
+            st.session_state[f"{self.instance_id}_evaluation_file"] = evaluation_file
+        self.evaluation_file = st.session_state.get(f"{self.instance_id}_evaluation_file", None)
     
     def predict(self)->DataFrame:
         isReady = True
         if self.state_dict_file is None:
-            st.warning("❗ Please upload PyTorch weight models to continue")
+            st.warning("❗ Por favor, cargue el archivo de pesos del modelo para continuar.")
             isReady = False
         if self.preprocessing_file is None:
-            st.warning("❗ Please upload preprocessing file to continue.")
+            st.warning("❗ Por favor, cargue el archivo de preprocesamiento para continuar.")
             isReady = False
         if self.baseline_hazards_file is None:
-            st.warning("❗ Please upload baseline hazards file to continue.")
+            st.warning("❗ Por favor, cargue el archivo de linea base de riesgos para continuar.")
+            isReady = False
+        if self.evaluation_file is None:
+            st.warning("❗ Por favor, cargue el archivo de evaluacion para continuar.")
             isReady = False
         if self.input_df is None:
-            st.warning("❗ Please upload input dataset to continue.")
+            st.warning("❗ Por favor, cargue el archivo con el conjunto de datos de entrada para continuar.")
             isReady = False
         if not isReady:
             return pd.DataFrame()
@@ -161,8 +182,10 @@ class DeepSurvModel(Model):
         self.preprocessed_input = pd.DataFrame(X, columns=input_df.columns) #type: ignore
         surv = model_loaded.predict_surv_df(X)
         self.surv = surv
+        # creando curva de supervivencia
         self.surv_curve = self._create_survival_curve(surv, model_loaded)
-        # self.model = model_loaded
+        # creando objeto de evaluacion
+        self.evaluation = joblib.load(self.evaluation_file)
         return surv
     
     def _create_survival_curve(self, surv, model_loaded):
@@ -224,6 +247,16 @@ class DeepSurvModel(Model):
         idx = np.where(s <= 0.5)[0]
         return times[idx[0]] if len(idx) > 0 else np.inf
 
+    def concordance_index(self)-> float | None:
+        if self.evaluation is None:
+            if self.evaluation_file is None:
+                st.warning("Por favor, cargue el archivo de evaluación para continuar.")
+                return None
+            else:
+                self.evaluation = joblib.load(self.evaluation_file)
+
+        return self.evaluation.concordance_td()#type:ignore
+
 class LifelinesCoxPHModel(Model):
     
     def __init__(self, tab_index = None):
@@ -242,7 +275,7 @@ class LifelinesCoxPHModel(Model):
         st.markdown("### Lifelines CoxPHFitter")
         # Preprocessing file
         preprocessing_file = st.file_uploader(
-            "Upload preprocessing model file", 
+            "Cargar archivo de preprocesamiento del modelo", 
             accept_multiple_files=False, 
             type="joblib", 
             key=f"lifelines_coxph_preprocessing_file_uploader_{self.instance_id}"
@@ -255,7 +288,7 @@ class LifelinesCoxPHModel(Model):
         self.preprocessing_file = st.session_state.get(f"{self.instance_id}_preprocessing_file", None)
 
         model_file = st.file_uploader(
-            "Upload CoxPHFitter trained model file",
+            "Cargar archivo del modelo entrenado de CoxPHFitter",
             accept_multiple_files=False,
             type="joblib",
             key=f"lifelines_coxph_model_uploader_{self.instance_id}"
@@ -266,15 +299,15 @@ class LifelinesCoxPHModel(Model):
             st.info(f"Archivo cargado: {st.session_state[f'{self.instance_id}_model_file'].name}")
         self.model_file = st.session_state.get(f"{self.instance_id}_model_file", None)
     
-    def predict(self, dataframe) -> pd.DataFrame:
+    def predict(self) -> pd.DataFrame:
         if self.input_df is None:
-            st.warning("❗ Please upload input dataset to continue.")
+            st.warning("❗ Por favor, cargue el archivo del conjunto de datos para continuar.")
             return pd.DataFrame()
         if self.model_file is None:
-            st.warning("❗ Please upload CoxPHFitter trained model file to continue.")
+            st.warning("❗ Por favor, cargue el archivo del modelo CoxPHFitter entrenado para continuar.")
             return pd.DataFrame()
         if self.preprocessing_file is None:
-            st.warning("❗ Please upload preprocessing file to continue.")
+            st.warning("❗ Por favor, suba el archivo de preprocesamiento para continuar")
             return pd.DataFrame()
         preprocessor = joblib.load(self.preprocessing_file)
         model_loaded = joblib.load(self.model_file)
@@ -334,6 +367,14 @@ class LifelinesCoxPHModel(Model):
         median_df = self.model_loaded.predict_median(self.preprocessed_input)
         return median_df
 
+    def concordance_index(self)-> float | None:
+        if self.model_loaded is None:
+            st.warning("Por favor, debe ejecutar previamente la predicción.")
+            return None
+
+        c_index = self.model_loaded.concordance_index_
+        return float(c_index)
+
 class CoxCCModel(Model):
     
     def __init__(self, tab_index = None):
@@ -356,6 +397,8 @@ class CoxCCModel(Model):
             output_bias=False
         )
         self.preprocessed_input = None
+        self.evaluation_file = None
+        self.evaluation = None
     
     def show_ui(self):
         st.markdown("### CoxCC ")
@@ -364,7 +407,7 @@ class CoxCCModel(Model):
             "Upload preprocessing model file", 
             accept_multiple_files=False, 
             type="pkl", 
-            key=f"deepsurv_preprocessing_file_uploader_{self.instance_id}"
+            key=f"coxcc_preprocessing_file_uploader_{self.instance_id}"
         )
         if preprocessing_file:
             st.session_state[f"{self.instance_id}_preprocessing_file"] = preprocessing_file
@@ -378,7 +421,7 @@ class CoxCCModel(Model):
             "Upload PyTorch weight models", 
             accept_multiple_files=False, 
             type="pt", 
-            key=f"deepsurv_state_dict_file_uploader_{self.instance_id}"
+            key=f"coxcc_state_dict_file_uploader_{self.instance_id}"
         )
         if state_dict_file:
             st.session_state[f"{self.instance_id}_state_dict_file"] = state_dict_file
@@ -389,25 +432,39 @@ class CoxCCModel(Model):
             "Upload baseline hazards file", 
             accept_multiple_files=False, 
             type="joblib", 
-            key=f"deepsurv_baseline_hazards_file_uploader_{self.instance_id}"
+            key=f"coxcc_baseline_hazards_file_uploader_{self.instance_id}"
         )
         if baseline_hazards_file:
             st.session_state[f"{self.instance_id}_baseline_hazards_file"] = baseline_hazards_file
         self.baseline_hazards_file = st.session_state.get(f"{self.instance_id}_baseline_hazards_file", None)
 
+        #Model Evaluation file
+        evaluation_file = st.file_uploader(
+            "Cargar archivo de evaluacion del modelo",
+            accept_multiple_files=False,
+            type="joblib",
+            key=f"coxcc_evaluation_file_uploader_{self.instance_id}"
+        )
+        if evaluation_file:
+            st.session_state[f"{self.instance_id}_evaluation_file"] = evaluation_file
+        self.evaluation_file = st.session_state.get(f"{self.instance_id}_evaluation_file", None)
+
     def predict(self) -> pd.DataFrame:
         isReady = True
         if self.state_dict_file is None:
-            st.warning("❗ Please upload PyTorch weight models to continue")
+            st.warning("❗ Por favor, suba el archivo de pesos del modelo para continuar.")
             isReady = False
         if self.preprocessing_file is None:
-            st.warning("❗ Please upload preprocessing file to continue.")
+            st.warning("❗ Por favor, suba el archivo de preprocesamiento para continuar.")
             isReady = False
         if self.baseline_hazards_file is None:
-            st.warning("❗ Please upload baseline hazards file to continue.")
+            st.warning("❗ Por favor, suba el archivo de linea base de riesgos para continuar.")
+            isReady = False
+        if self.evaluation_file is None:
+            st.warning("❗ Por favor, cargue el archivo de evaluacion para continuar.")
             isReady = False
         if self.input_df is None:
-            st.warning("❗ Please upload input dataset to continue.")
+            st.warning("❗ Por favor, cargue el archivo del conjunto de datos para continuar.")
             isReady = False
         if not isReady:
             return pd.DataFrame()
@@ -415,10 +472,6 @@ class CoxCCModel(Model):
         loaded_preprocessor = joblib.load(self.preprocessing_file)
         loaded_baseline_hazards = joblib.load(self.baseline_hazards_file)
         loaded_model_net_state_dict = torch.load(self.state_dict_file)
-
-        # print(f"Loaded preprocessor: {loaded_preprocessor}")
-        # print(f"Loaded baseline hazards: {loaded_baseline_hazards}")
-        # print(f"Loaded model state dict keys: {loaded_model_net_state_dict}")
 
         net = self.net
         net.load_state_dict(loaded_model_net_state_dict)
@@ -439,6 +492,8 @@ class CoxCCModel(Model):
         # print(f"Predicted survival values: {surv}")
         self.surv = surv
         self.surv_curve = self._create_survival_curve(surv, model_loaded)
+        # creando objetos de evaluacion
+        self.evaluation = joblib.load(self.evaluation_file)
         return surv
 
     def model_details(self) -> None:
@@ -500,6 +555,16 @@ class CoxCCModel(Model):
         idx = np.where(s <= 0.5)[0]
         return times[idx[0]] if len(idx) > 0 else np.inf
 
+    def concordance_index(self)-> float | None:
+        if self.evaluation is None:
+            if self.evaluation_file is None:
+                st.warning("Por favor, cargue el archivo de evaluación para continuar.")
+                return None
+            else:
+                self.evaluation = joblib.load(self.evaluation_file)
+
+        return self.evaluation.concordance_td()#type:ignore
+
 class CoxTimeModel(Model):
     
     def __init__(self, tab_index = None):
@@ -513,6 +578,7 @@ class CoxTimeModel(Model):
         self.baseline_hazards_file = None
         # self.net_file = None
         self.labtrans_file = None
+        self.evaluation_file = None
         self.loaded_model = None
         self.net = MLPVanillaCoxTime(
             in_features = 45, 
@@ -524,6 +590,7 @@ class CoxTimeModel(Model):
         self.loaded_baseline_hazards = None
         self.loaded_preprocessor = None
         self.loaded_labtrans = None
+        self.evaluation = None
     
     def show_ui(self):
         st.markdown("### CoxTime")
@@ -554,7 +621,7 @@ class CoxTimeModel(Model):
 
         # Baseline hazards file
         baseline_hazards_file = st.file_uploader(
-            "Upload baseline hazards file", 
+            "Cargar archivo de linea base de riesgos", 
             accept_multiple_files=False, 
             type="joblib", 
             key=f"coxtime_baseline_hazards_file_uploader_{self.instance_id}"
@@ -573,6 +640,17 @@ class CoxTimeModel(Model):
         if labtrans_file:
             st.session_state[f"{self.instance_id}_labtrans_file"] = labtrans_file
         self.labtrans_file = st.session_state.get(f"{self.instance_id}_labtrans_file", None)
+
+        #Model Evaluation file
+        evaluation_file = st.file_uploader(
+            "Cargar archivo de evaluacion del modelo",
+            accept_multiple_files=False,
+            type="joblib",
+            key=f"coxcc_evaluation_file_uploader_{self.instance_id}"
+        )
+        if evaluation_file:
+            st.session_state[f"{self.instance_id}_evaluation_file"] = evaluation_file
+        self.evaluation_file = st.session_state.get(f"{self.instance_id}_evaluation_file", None)
     
     def predict(self) -> pd.DataFrame:
         isReady = True
@@ -591,6 +669,9 @@ class CoxTimeModel(Model):
         # if self.net_file is None:
         #     st.warning("❗ Por favor, cargue el archivo de la red neuronal (net)para continuar.")
         #     isReady = False
+        if self.evaluation_file is None:
+            st.warning("❗ Por favor, cargue el archivo de evaluacion para continuar.")
+            isReady = False
         if self.input_df is None:
             st.warning("❗ Por favor, cargue el archivo con el conjunto de datos de entrada.")
             isReady = False
@@ -618,6 +699,8 @@ class CoxTimeModel(Model):
         surv.index = times
         self.surv = surv
         self.surv_curve = self._create_survival_curve()
+        #creando objeto de evaluacion
+        self.evaluation = joblib.load(self.evaluation_file)
         return surv
 
     def model_details(self) -> None:
@@ -675,5 +758,13 @@ class CoxTimeModel(Model):
             return pd.DataFrame()
         return self._median_times_simple(self.surv)
     
+    def concordance_index(self)-> float | None:
+        if self.evaluation is None:
+            if self.evaluation_file is None:
+                st.warning("Por favor, cargue el archivo de evaluación para continuar.")
+                return None
+            else:
+                self.evaluation = joblib.load(self.evaluation_file)
 
+        return self.evaluation.concordance_td()#type:ignore
 
