@@ -31,6 +31,10 @@ class Model(ABC):
         self.type = ""
         self.parameters = {}
         self.input_df = None
+        self.median_time = None
+        self.surv = None
+        self.surv_curve = None
+        self.c_index = None
     
     def set_name(self, name):
         self.name = name
@@ -44,6 +48,10 @@ class Model(ABC):
     def set_input_df(self, df):
         self.input_df = df
     
+    @abstractmethod
+    def get_survival_func(self):
+        pass
+
     @abstractmethod
     def show_ui(self)->None:
         pass
@@ -88,8 +96,6 @@ class DeepSurvModel(Model):
         self.state_dict_file = None
         self.baseline_hazards_file = None
         self.evaluation_file = None
-        self.surv_curve = None
-        self.surv = None
         self.model = None
         self.model_loaded = None
         self.preprocessed_input = None
@@ -235,8 +241,8 @@ class DeepSurvModel(Model):
         for i in range(self.preprocessed_input.shape[0]):
             median_time = self._predict_median_survival_time(self.surv[[i]])
             emp[f"Caso {i+1}"] = median_time
-        
-        return pd.DataFrame.from_dict(emp, orient='index', columns=['Median Survival Time'])
+        self.median_time = pd.DataFrame.from_dict(emp, orient='index', columns=['Median Survival Time'])
+        return self.median_time
         
     def _predict_median_survival_time(self, surv):
         if self.surv is None:
@@ -254,9 +260,12 @@ class DeepSurvModel(Model):
                 return None
             else:
                 self.evaluation = joblib.load(self.evaluation_file)
+        self.c_index = self.evaluation.concordance_td()#type:ignore
+        return self.c_index
 
-        return self.evaluation.concordance_td()#type:ignore
-
+    def get_survival_func(self):
+        return self.surv
+    
 class LifelinesCoxPHModel(Model):
     
     def __init__(self, tab_index = None):
@@ -264,12 +273,10 @@ class LifelinesCoxPHModel(Model):
         self.type = "Lifelines-CoxPH"
         self.instance_id = f"lifelines_coxph_tab_{tab_index}" if tab_index is not None else "lifelines_coxph_temp"
         self.curv = None
-        self.surv_curve = None
         self.model_file = None
-        self.surv = None
         self.model_loaded = None
         self.preprocessing_file = None
-        self.preprocessed_input = None
+        self.preprocessed_input = None        
     
     def show_ui(self):
         st.markdown("### Lifelines CoxPHFitter")
@@ -364,17 +371,20 @@ class LifelinesCoxPHModel(Model):
         if self.surv is None or self.model_loaded is None or self.preprocessed_input is None:
             st.warning("❗ Please run prediction first to get median survival time.")
             return pd.DataFrame()
-        median_df = self.model_loaded.predict_median(self.preprocessed_input)
-        return median_df
+        self.median_time = self.model_loaded.predict_median(self.preprocessed_input)
+        return self.median_time
 
     def concordance_index(self)-> float | None:
         if self.model_loaded is None:
             st.warning("Por favor, debe ejecutar previamente la predicción.")
             return None
 
-        c_index = self.model_loaded.concordance_index_
-        return float(c_index)
+        self.c_index = float(self.model_loaded.concordance_index_)
+        return self.c_index
 
+    def get_survival_func(self):
+        return self.surv
+    
 class CoxCCModel(Model):
     
     def __init__(self, tab_index = None):
@@ -386,8 +396,6 @@ class CoxCCModel(Model):
         self.loaded_preprocessor = None
         self.loaded_baseline_hazards = None
         self.loaded_net_state_dict = None
-        self.surv_curve = None
-        self.surv = None
         self.net = tt.practical.MLPVanilla( #type: ignore
             in_features=45, 
             num_nodes=[32, 32], 
@@ -399,6 +407,7 @@ class CoxCCModel(Model):
         self.preprocessed_input = None
         self.evaluation_file = None
         self.evaluation = None
+        self.median_time = None
     
     def show_ui(self):
         st.markdown("### CoxCC ")
@@ -544,7 +553,8 @@ class CoxCCModel(Model):
             median_time = self._predict_median_survival_time(self.surv[[i]])
             emp[f"Caso {i+1}"] = median_time
         
-        return pd.DataFrame.from_dict(emp, orient='index', columns=['Median Survival Time'])
+        self.median_time = pd.DataFrame.from_dict(emp, orient='index', columns=['Median Survival Time'])
+        return self.median_time
 
     def _predict_median_survival_time(self, surv):
         if self.surv is None:
@@ -562,16 +572,17 @@ class CoxCCModel(Model):
                 return None
             else:
                 self.evaluation = joblib.load(self.evaluation_file)
+        self.c_index = float(self.evaluation.concordance_td())#type:ignore
+        return self.c_index
 
-        return self.evaluation.concordance_td()#type:ignore
-
+    def get_survival_func(self):
+        return self.surv
+    
 class CoxTimeModel(Model):
     
     def __init__(self, tab_index = None):
         super().__init__()
         self.type = "CoxTime"
-        self.surv = None
-        self.surv_curve = None
         self.instance_id = f"coxtime_tab_{tab_index}" if tab_index is not None else "coxtime_temp"
         self.preprocessing_file = None
         self.state_dict_file = None
@@ -756,7 +767,8 @@ class CoxTimeModel(Model):
         if self.surv is None:
             st.warning("❗ Debe predecir primero")
             return pd.DataFrame()
-        return self._median_times_simple(self.surv)
+        self.median_time = self._median_times_simple(self.surv)
+        return self.median_time
     
     def concordance_index(self)-> float | None:
         if self.evaluation is None:
@@ -766,5 +778,8 @@ class CoxTimeModel(Model):
             else:
                 self.evaluation = joblib.load(self.evaluation_file)
 
-        return self.evaluation.concordance_td()#type:ignore
+        self.c_index = self.evaluation.concordance_td()#type:ignore
+        return self.c_index
 
+    def get_survival_func(self):
+        return self.surv

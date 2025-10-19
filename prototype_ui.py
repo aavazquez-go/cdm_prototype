@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from settings import Model, DeepSurvModel, LifelinesCoxPHModel, CoxCCModel, CoxTimeModel
+from assemblies import EnsembleManager
 
 # Inicializar
 if "num_modelos" not in st.session_state:
@@ -13,8 +14,8 @@ if 'input_dataset' not in st.session_state:
 if 'prediction_results' not in st.session_state:
     st.session_state.prediction_results = {}
 
-#if 'models' not in st.session_state:
-st.session_state.models = []
+if 'models' not in st.session_state:
+    st.session_state.models = []
 
 def actualizar_num_modelos():
     st.session_state.num_modelos = st.session_state.input_num_modelos
@@ -49,6 +50,12 @@ with st.sidebar:
         "Selecciona los tipos de modelos a usar",
         options=["Lifelines-CoxPH", "DeepSurv", "CoxCC", "CoxTime"],
         default=["Lifelines-CoxPH", "DeepSurv", "CoxCC", "CoxTime"]
+    )
+    st.markdown("---")
+    st.markdown("### Modelos de ensamble")
+    assembly_model = st.selectbox(
+        "Selecciona el modelo de ensamble",
+        ("Survival Function Averaging","Median Time Averaging","Stacking","Performance-weighted ensemble", "Rank-based ensemble","Bayesian Model Averaging","Voting/Ranking Consensus")
     )
 
 st.title("Prototipo CADM para predicción de insolvencia en PYMEs")
@@ -158,18 +165,63 @@ for i, tab in enumerate(tabs):
                     'df_median_time': df_median_time,
                     'c_index': c_index
                 }
+
+                # IMPORTANTE: Asegurar que los atributos del modelo se actualicen
+                # model.surv = df_pred
+                # model.surv_curve = survival_curve
+                # model.median_time = df_median_time
+                # model.c_index = c_index
+
+                # # Actualizar el modelo en session_state
+                # st.session_state.models[i] = model
+                st.session_state.models[i].surv = df_pred
+                st.session_state.models[i].surv_curve = survival_curve
+                st.session_state.models[i].median_time = df_median_time
+                st.session_state.models[i].c_index = c_index
+
+                st.success(f"Predicción completada para {model.name}")
+                st.rerun()
+
                 # Streamlit se re-ejecutará y mostrará el resultado arriba
             except Exception as e:
-                st.error(f"Error al predecir con el modelo {model.name}: {e} with stacktrace {e.with_traceback}")
+                st.error(f"Error al predecir con el modelo {model.name}: {str(e)}")
+                import traceback
+                st.error(traceback.format_exc())
 
-st.markdown("## Realizar predicciones")
+st.markdown("## Realizar predicciones de Ensamble")
+# Debug: mostrar estado de los modelos
+with st.expander("🔍 Debug - Estado de modelos"):
+    for i, m in enumerate(st.session_state.models):
+        if m is not None:
+            has_surv = hasattr(m, 'surv') and m.surv is not None
+            st.write(f"Modelo {i+1} ({m.name}): surv={'✅' if has_surv else '❌'}")
+        else:
+            st.write(f"Modelo {i+1}: None")
 
-if st.button("Models Predict") and st.session_state.input_dataset is not None:
-    models = st.session_state.models
-    input_dataset = st.session_state.input_dataset
-    for m in models:
-        df_pred = m.predict(input_dataset)
-        st.markdown(f"**{m.name}-{m.type}** prediction:")
-        st.dataframe(df_pred)
+if st.button("Generar Predicción de Ensamble"):
+    # Verificar que hay modelos con predicciones
+    models_with_predictions = [m for m in st.session_state.models if m is not None and hasattr(m, 'surv') and m.surv is not None]
+    
+    if not models_with_predictions:
+        st.error("❗ Por favor, realiza predicciones en al menos un modelo antes de generar el ensamble.")
+    else:
+        st.info(f"Generando ensamble con {len(models_with_predictions)} modelos")
 
-st.markdown("## Toma de decisiones")
+        try:
+            ensemble_mgr = EnsembleManager(assembly_model)
+            ensemble_mgr.fit(st.session_state.models)
+            ensemble_surv, ensemble_median = ensemble_mgr.predict()
+            
+            st.markdown("### Predicción del Ensamble")
+            st.markdown(f"#### {assembly_model}")
+            st.dataframe(ensemble_surv)
+            st.pyplot(ensemble_mgr.plot_ensemble_survival())
+            st.dataframe(ensemble_median)
+            
+            info = ensemble_mgr.get_strategy_info()
+            st.json(info)
+            st.rerun()
+        except Exception as e:
+            st.error(f"Error al generar el ensamble: {e}")
+            import traceback
+            st.error(traceback.format_exc())
