@@ -17,6 +17,9 @@ if 'prediction_results' not in st.session_state:
 if 'models' not in st.session_state:
     st.session_state.models = []
 
+if 'ensemble_results' not in st.session_state:
+    st.session_state.ensemble_results = None
+
 def actualizar_num_modelos():
     st.session_state.num_modelos = st.session_state.input_num_modelos
 
@@ -166,14 +169,6 @@ for i, tab in enumerate(tabs):
                     'c_index': c_index
                 }
 
-                # IMPORTANTE: Asegurar que los atributos del modelo se actualicen
-                # model.surv = df_pred
-                # model.surv_curve = survival_curve
-                # model.median_time = df_median_time
-                # model.c_index = c_index
-
-                # # Actualizar el modelo en session_state
-                # st.session_state.models[i] = model
                 st.session_state.models[i].surv = df_pred
                 st.session_state.models[i].surv_curve = survival_curve
                 st.session_state.models[i].median_time = df_median_time
@@ -211,17 +206,48 @@ if st.button("Generar Predicción de Ensamble"):
             ensemble_mgr = EnsembleManager(assembly_model)
             ensemble_mgr.fit(st.session_state.models)
             ensemble_surv, ensemble_median = ensemble_mgr.predict()
-            
-            st.markdown("### Predicción del Ensamble")
-            st.markdown(f"#### {assembly_model}")
-            st.dataframe(ensemble_surv)
-            st.pyplot(ensemble_mgr.plot_ensemble_survival())
-            st.dataframe(ensemble_median)
-            
-            info = ensemble_mgr.get_strategy_info()
-            st.json(info)
+
+            # IMPORTANTE: Guardar los resultados en session_state
+            st.session_state.ensemble_results = {
+                'strategy': assembly_model,
+                'ensemble_surv': ensemble_surv,
+                'ensemble_median': ensemble_median,
+                'ensemble_mgr': ensemble_mgr,
+                'info': ensemble_mgr.get_strategy_info()
+            }
+            # st.markdown("### Predicción del Ensamble")
+            # st.markdown(f"#### {assembly_model}")
+            # st.dataframe(ensemble_surv)
+            # st.pyplot(ensemble_mgr.plot_ensemble_survival())
+            # st.dataframe(ensemble_median)
+            # info = ensemble_mgr.get_strategy_info()
+            # st.json(info)
+            st.success("✅ Ensamble generado exitosamente")
             st.rerun()
         except Exception as e:
             st.error(f"Error al generar el ensamble: {e}")
             import traceback
             st.error(traceback.format_exc())
+# MOSTRAR RESULTADOS DEL ENSAMBLE SI EXISTEN
+if st.session_state.ensemble_results is not None:
+    results = st.session_state.ensemble_results
+    
+    st.markdown("### Predicción del Ensamble")
+    st.markdown(f"#### {results['strategy']}")
+    
+    st.markdown("**Funciones de Supervivencia del Ensamble:**")
+    st.dataframe(results['ensemble_surv'])
+    
+    st.markdown("**Gráfico de Curvas de Supervivencia:**")
+    st.pyplot(results['ensemble_mgr'].plot_ensemble_survival())
+    
+    st.markdown("**Tiempos Medianos de Supervivencia:**")
+    st.dataframe(results['ensemble_median'])
+    
+    st.markdown("**Información de la Estrategia:**")
+    st.json(results['info'])
+    
+    # Botón para limpiar resultados si es necesario
+    if st.button("Limpiar resultados del ensamble"):
+        st.session_state.ensemble_results = None
+        st.rerun()

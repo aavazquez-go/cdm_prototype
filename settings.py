@@ -369,9 +369,18 @@ class LifelinesCoxPHModel(Model):
     
     def predict_median_survival_time(self) -> DataFrame:
         if self.surv is None or self.model_loaded is None or self.preprocessed_input is None:
-            st.warning("❗ Please run prediction first to get median survival time.")
+            st.warning("❗ Por favor, ejecute primero la prediccion para obtener la mediana del tiempo de supervivencia.")
             return pd.DataFrame()
-        self.median_time = self.model_loaded.predict_median(self.preprocessed_input)
+        
+        # Obtener las medianas del modelo
+        median_result = self.model_loaded.predict_median(self.preprocessed_input)
+        
+        # Normalizar el índice a "Caso X" format
+        emp = {}
+        for i, (idx, value) in enumerate(median_result.items()):
+            emp[f"Caso {i+1}"] = value
+        
+        self.median_time = pd.DataFrame.from_dict(emp, orient='index', columns=['Median Survival Time'])
         return self.median_time
 
     def concordance_index(self)-> float | None:
@@ -756,12 +765,16 @@ class CoxTimeModel(Model):
     def _median_times_simple(self, surv):
         times = surv.index.values.astype(float)   #type: ignore
         arr = surv.values   #type: ignore
-        mts = []
+        mts = {}
+        
         for i in range(arr.shape[1]):
             idx = np.where(arr[:, i] <= 0.5)[0]
-            mts.append(float(times[idx[0]]) if idx.size else np.inf)
-        return pd.DataFrame(mts, index=surv.columns, columns=['Median Survival Time']).astype(float)
-        # return pd.Series(mts, index=surv.columns, name='median_time') #type:ignore
+            median_time = float(times[idx[0]]) if idx.size else np.inf
+            # Usar formato consistente "Caso X"
+            mts[f"Caso {i+1}"] = median_time
+        
+        # Retornar como DataFrame
+        return pd.DataFrame.from_dict(mts, orient='index', columns=['Median Survival Time']).astype(float)
 
     def predict_median_survival_time(self) -> DataFrame:
         if self.surv is None:

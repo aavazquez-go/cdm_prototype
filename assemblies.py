@@ -35,7 +35,6 @@ class EnsembleStrategy(ABC):
         """Retorna los pesos utilizados por el modelo"""
         pass
 
-
 class SurvivalFunctionAveraging(EnsembleStrategy):
     """Promedia las funciones de supervivencia de todos los modelos"""
     
@@ -48,29 +47,52 @@ class SurvivalFunctionAveraging(EnsembleStrategy):
             st.error("No hay funciones de supervivencia disponibles")
             return pd.DataFrame(), pd.Series()
         
-        # Convertir todos a mismo índice
-        all_surv = pd.concat(survival_funcs.values(), axis=1)
+        # Alinear todos los índices de tiempo
+        all_times = []
+        for surv in survival_funcs.values():
+            all_times.extend(surv.index.tolist())
+        all_times = sorted(set(all_times))
         
-        # Promediar por fila (por tiempo)
-        ensemble_surv = all_surv.groupby(level=0).mean()
+        # Reindexar todos los DataFrames al índice común
+        aligned_surv = []
+        for surv in survival_funcs.values():
+            aligned = surv.reindex(all_times, method='ffill')
+            aligned_surv.append(aligned)
         
-        # Calcular medianas del ensamble
+        # Concatenar por columnas
+        all_surv_concat = pd.concat(aligned_surv, axis=1)
+        
+        # Agrupar por empresa (última parte del nombre de columna después del último _)
+        # y promediar
+        ensemble_surv = all_surv_concat.groupby( #type: ignore
+            lambda x: x.rsplit('_', 1)[-1], axis=1
+        ).mean()
+        
+        # Calcular medianas a partir de la curva promediada
         ensemble_median = self._calculate_medians(ensemble_surv)
         
         return ensemble_surv, ensemble_median
     
     def _calculate_medians(self, surv_df: pd.DataFrame) -> pd.Series:
+        """Calcula los tiempos medianos de supervivencia de cada empresa"""
         medians = {}
         for col in surv_df.columns:
             times = surv_df.index.values
             s = surv_df[col].values
+            
+            # Buscar el primer tiempo donde la supervivencia cae por debajo de 0.5
             idx = np.where(s <= 0.5)[0]
-            medians[col] = times[idx[0]] if len(idx) > 0 else np.inf
-        return pd.Series(medians)
+            
+            if len(idx) > 0:
+                medians[col] = times[idx[0]]
+            else:
+                # Si nunca cae por debajo de 0.5, usar infinity
+                medians[col] = np.inf
+        
+        return pd.Series(medians, name='Median Survival Time')
     
     def get_weights(self) -> Dict[str, float]:
         return {"method": "Equal weights for all models"}
-
 
 class MedianTimeAveraging(EnsembleStrategy):
     """Promedia los tiempos de supervivencia mediana de todos los modelos"""
@@ -84,24 +106,60 @@ class MedianTimeAveraging(EnsembleStrategy):
             st.error("No hay tiempos medianos disponibles")
             return pd.DataFrame(), pd.Series()
         
-        # Concatenar todas las medianas
-        all_medians = pd.concat(median_times.values(), axis=1)
-        
-        # Promediar por fila (por empresa/caso)
-        ensemble_median = all_medians.mean(axis=1)
+        # Combinar medianas de manera correcta
+        ensemble_median = self._average_median_combine(median_times)
         
         # Para la curva de supervivencia, usar el promedio de las curvas disponibles
         if survival_funcs:
-            all_surv = pd.concat(survival_funcs.values(), axis=1)
-            ensemble_surv = all_surv.groupby(level=0).mean()
+            # Alinear índices
+            all_times = []
+            for surv in survival_funcs.values():
+                all_times.extend(surv.index.tolist())
+            all_times = sorted(set(all_times))
+            
+            aligned_surv = []
+            for surv in survival_funcs.values():
+                aligned = surv.reindex(all_times, method='ffill')
+                aligned_surv.append(aligned)
+            
+            all_surv_concat = pd.concat(aligned_surv, axis=1)
+            ensemble_surv = all_surv_concat.groupby(
+                lambda x: x.rsplit('_', 1)[-1], axis=1
+            ).mean()
         else:
             ensemble_surv = pd.DataFrame()
         
         return ensemble_surv, ensemble_median
     
+    def _average_median_combine(self, median_times: Dict) -> pd.Series:
+        """Promedia las medianas de manera correcta"""
+        if not median_times:
+            return pd.Series(name='Median Survival Time')
+        
+        # Extraer el nombre del caso de cada índice y agrupar antes de concatenar
+        case_medians = {}
+        
+        for model_name, median_series in median_times.items():
+            for idx, value in median_series.items():
+                # idx tiene formato "ModelName_Caso X"
+                # Extraer solo la parte "Caso X"
+                case_name = idx.rsplit('_', 1)[-1]
+                
+                if case_name not in case_medians:
+                    case_medians[case_name] = []
+                
+                case_medians[case_name].append(value)
+        
+        # Promediar los valores para cada caso
+        ensemble_median = {}
+        for case_name, values in case_medians.items():
+            ensemble_median[case_name] = np.mean(values)
+        
+        result = pd.Series(ensemble_median, name='Median Survival Time')
+        return result
+    
     def get_weights(self) -> Dict[str, float]:
         return {"method": "Equal weights for median averaging"}
-
 
 class PerformanceWeightedEnsemble(EnsembleStrategy):
     """Pondera las predicciones basándose en el índice de concordancia de cada modelo"""
@@ -126,7 +184,7 @@ class PerformanceWeightedEnsemble(EnsembleStrategy):
         self.weights = {}
         total_c = np.sum(c_values)
         
-        for i, (model_name, surv) in enumerate(survival_funcs.items()):
+        for model_name, surv in survival_funcs.items():
             c_index = c_indices.get(model_name, 0.5)
             if c_index is None:
                 c_index = 0.5
@@ -135,26 +193,63 @@ class PerformanceWeightedEnsemble(EnsembleStrategy):
         # Combinar funciones de supervivencia con pesos
         ensemble_surv = self._weighted_combine(survival_funcs, self.weights)
         
-        # Combinar medianas con pesos
-        all_medians = pd.concat(median_times.values(), axis=1)
-        ensemble_median = (all_medians * pd.Series(list(self.weights.values()))).sum(axis=1)
+        # Combinar medianas con pesos - método mejorado
+        ensemble_median = self._weighted_median_combine(median_times, self.weights)
         
         return ensemble_surv, ensemble_median
     
     def _weighted_combine(self, survival_funcs: Dict, weights: Dict) -> pd.DataFrame:
+        # Alinear índices de tiempo
+        all_times = []
+        for surv in survival_funcs.values():
+            all_times.extend(surv.index.tolist())
+        all_times = sorted(set(all_times))
+        
         weighted_surv = None
         for model_name, weight in weights.items():
             surv = survival_funcs[model_name]
+            aligned = surv.reindex(all_times, method='ffill')
+            weighted = aligned * weight
+            
             if weighted_surv is None:
-                weighted_surv = surv * weight
+                weighted_surv = weighted
             else:
-                # Alinear índices si es necesario
-                weighted_surv = weighted_surv.add(surv * weight, fill_value=0)
-        return weighted_surv
+                weighted_surv = weighted_surv.add(weighted, fill_value=0)
+        
+        # Agrupar por empresa
+        ensemble_surv = weighted_surv.groupby(
+            lambda x: x.rsplit('_', 1)[-1], axis=1
+        ).sum()
+        
+        return ensemble_surv
+    
+    def _weighted_median_combine(self, median_times: Dict, weights: Dict) -> pd.Series:
+        """Combina medianas ponderadas de manera correcta"""
+        if not median_times:
+            return pd.Series()
+        
+        # Crear un DataFrame temporal con todas las medianas
+        all_medians_list = []
+        for model_name, median_series in median_times.items():
+            # median_series tiene índice tipo "DeepSurv_Caso 1", "DeepSurv_Caso 2", etc.
+            weight = weights.get(model_name, 1.0)
+            weighted_median = median_series * weight
+            all_medians_list.append(weighted_median)
+        
+        # Concatenar todas las medianas ponderadas
+        all_medians_concat = pd.concat(all_medians_list)
+        
+        # Agrupar por el nombre del caso (última parte después del último _)
+        # y sumar (ya que están ponderadas)
+        ensemble_median = all_medians_concat.groupby(
+            lambda x: x.rsplit('_', 1)[-1]
+        ).sum()
+        
+        ensemble_median.name = 'Median Survival Time'
+        return ensemble_median
     
     def get_weights(self) -> Dict[str, float]:
         return self.weights
-
 
 class RankBasedEnsemble(EnsembleStrategy):
     """Ranquea los modelos y combina basándose en su desempeño relativo"""
@@ -172,35 +267,69 @@ class RankBasedEnsemble(EnsembleStrategy):
         # Ranquear modelos por c_index
         c_values = {k: v if v is not None else 0.5 for k, v in c_indices.items()}
         
-        # Obtener rangos (mayor c_index = rank menor = peso mayor)
         sorted_models = sorted(c_values.items(), key=lambda x: x[1], reverse=True)
         n_models = len(sorted_models)
         
-        # Asignar pesos inversamente proporcionales al rango
         for rank, (model_name, _) in enumerate(sorted_models, 1):
             self.weights[model_name] = (n_models - rank + 1) / sum(range(1, n_models + 1))
         
         # Combinar con pesos
         weighted_surv = self._weighted_combine(survival_funcs, self.weights)
         
-        all_medians = pd.concat(median_times.values(), axis=1)
-        ensemble_median = (all_medians * pd.Series(list(self.weights.values()))).sum(axis=1)
+        # Combinar medianas con pesos - método mejorado
+        ensemble_median = self._weighted_median_combine(median_times, self.weights)
         
         return weighted_surv, ensemble_median
     
     def _weighted_combine(self, survival_funcs: Dict, weights: Dict) -> pd.DataFrame:
+        all_times = []
+        for surv in survival_funcs.values():
+            all_times.extend(surv.index.tolist())
+        all_times = sorted(set(all_times))
+        
         weighted_surv = None
         for model_name, weight in weights.items():
             surv = survival_funcs[model_name]
+            aligned = surv.reindex(all_times, method='ffill')
+            weighted = aligned * weight
+            
             if weighted_surv is None:
-                weighted_surv = surv * weight
+                weighted_surv = weighted
             else:
-                weighted_surv = weighted_surv.add(surv * weight, fill_value=0)
-        return weighted_surv
+                weighted_surv = weighted_surv.add(weighted, fill_value=0)
+        
+        ensemble_surv = weighted_surv.groupby(
+            lambda x: x.rsplit('_', 1)[-1], axis=1
+        ).sum()
+        
+        return ensemble_surv
+    
+    def _weighted_median_combine(self, median_times: Dict, weights: Dict) -> pd.Series:
+        """Combina medianas ponderadas de manera correcta"""
+        if not median_times:
+            return pd.Series()
+        
+        # Crear un DataFrame temporal con todas las medianas
+        all_medians_list = []
+        for model_name, median_series in median_times.items():
+            weight = weights.get(model_name, 1.0)
+            weighted_median = median_series * weight
+            all_medians_list.append(weighted_median)
+        
+        # Concatenar todas las medianas ponderadas
+        all_medians_concat = pd.concat(all_medians_list)
+        
+        # Agrupar por el nombre del caso (última parte después del último _)
+        # y sumar (ya que están ponderadas)
+        ensemble_median = all_medians_concat.groupby(
+            lambda x: x.rsplit('_', 1)[-1]
+        ).sum()
+        
+        ensemble_median.name = 'Median Survival Time'
+        return ensemble_median
     
     def get_weights(self) -> Dict[str, float]:
         return self.weights
-
 
 class StackingEnsemble(EnsembleStrategy):
     """Usa las predicciones como características para entrenar un meta-modelo"""
@@ -217,28 +346,37 @@ class StackingEnsemble(EnsembleStrategy):
                 models, survival_funcs, median_times, c_indices)
         
         # Usar medianas como características
-        all_medians = pd.concat(median_times.values(), axis=1)
+        all_medians = pd.concat(median_times.values(), axis=0)
         
-        # Para simplificar, usamos pesos basados en c_index como meta-modelo
-        # En una implementación más avanzada, se entrenaría un modelo real
+        # Ponderar por c_index
         c_values = {k: v if v is not None else 0.5 for k, v in c_indices.items()}
         c_array = np.array([c_values[k] for k in median_times.keys()])
         c_normalized = c_array / np.sum(c_array)
         
-        # Combinar medianas
-        ensemble_median = (all_medians * c_normalized).sum(axis=1)
+        ensemble_median = (all_medians * c_normalized[0]).groupby(
+            lambda x: x.rsplit('_', 1)[-1]
+        ).sum()
         
         # Combinar supervivencia
-        all_surv = pd.concat(survival_funcs.values(), axis=1)
-        ensemble_surv = (all_surv.groupby(level=0).apply(
-            lambda x: (x * c_normalized).sum(axis=1)
-        ))
+        all_times = []
+        for surv in survival_funcs.values():
+            all_times.extend(surv.index.tolist())
+        all_times = sorted(set(all_times))
+        
+        aligned_surv = []
+        for surv in survival_funcs.values():
+            aligned = surv.reindex(all_times, method='ffill')
+            aligned_surv.append(aligned)
+        
+        all_surv_concat = pd.concat(aligned_surv, axis=1)
+        ensemble_surv = all_surv_concat.groupby(
+            lambda x: x.rsplit('_', 1)[-1], axis=1
+        ).mean()
         
         return ensemble_surv, ensemble_median
     
     def get_weights(self) -> Dict[str, float]:
         return {"method": "Meta-learner weights based on c_index"}
-
 
 class BayesianModelAveraging(EnsembleStrategy):
     """Promedia bayesianamente ponderando por el desempeño de cada modelo"""
@@ -266,24 +404,60 @@ class BayesianModelAveraging(EnsembleStrategy):
         # Combinar con pesos
         weighted_surv = self._weighted_combine(survival_funcs, self.weights)
         
-        all_medians = pd.concat(median_times.values(), axis=1)
-        ensemble_median = (all_medians * pd.Series(list(self.weights.values()))).sum(axis=1)
+        # Combinar medianas con pesos - método mejorado
+        ensemble_median = self._weighted_median_combine(median_times, self.weights)
         
         return weighted_surv, ensemble_median
     
     def _weighted_combine(self, survival_funcs: Dict, weights: Dict) -> pd.DataFrame:
+        all_times = []
+        for surv in survival_funcs.values():
+            all_times.extend(surv.index.tolist())
+        all_times = sorted(set(all_times))
+        
         weighted_surv = None
         for model_name, weight in weights.items():
             surv = survival_funcs[model_name]
+            aligned = surv.reindex(all_times, method='ffill')
+            weighted = aligned * weight
+            
             if weighted_surv is None:
-                weighted_surv = surv * weight
+                weighted_surv = weighted
             else:
-                weighted_surv = weighted_surv.add(surv * weight, fill_value=0)
-        return weighted_surv
+                weighted_surv = weighted_surv.add(weighted, fill_value=0)
+        
+        ensemble_surv = weighted_surv.groupby(
+            lambda x: x.rsplit('_', 1)[-1], axis=1
+        ).sum()
+        
+        return ensemble_surv
+    
+    def _weighted_median_combine(self, median_times: Dict, weights: Dict) -> pd.Series:
+        """Combina medianas ponderadas de manera correcta"""
+        if not median_times:
+            return pd.Series()
+        
+        # Crear un DataFrame temporal con todas las medianas
+        all_medians_list = []
+        for model_name, median_series in median_times.items():
+            weight = weights.get(model_name, 1.0)
+            weighted_median = median_series * weight
+            all_medians_list.append(weighted_median)
+        
+        # Concatenar todas las medianas ponderadas
+        all_medians_concat = pd.concat(all_medians_list)
+        
+        # Agrupar por el nombre del caso (última parte después del último _)
+        # y sumar (ya que están ponderadas)
+        ensemble_median = all_medians_concat.groupby(
+            lambda x: x.rsplit('_', 1)[-1]
+        ).sum()
+        
+        ensemble_median.name = 'Median Survival Time'
+        return ensemble_median
     
     def get_weights(self) -> Dict[str, float]:
         return self.weights
-
 
 class VotingRankingConsensus(EnsembleStrategy):
     """Combina votos de modelos basándose en ranking de supervivencia"""
@@ -297,22 +471,29 @@ class VotingRankingConsensus(EnsembleStrategy):
             st.error("No hay medianas disponibles para ranking")
             return pd.DataFrame(), pd.Series()
         
-        # Ranquear empresas por mediana de supervivencia de cada modelo
-        all_medians = pd.concat(median_times.values(), axis=1)
-        
-        # Obtener ranks para cada modelo
-        ranks = all_medians.rank(axis=0)
-        
-        # Promedio de ranks (consensus ranking)
-        consensus_rank = ranks.mean(axis=1)
-        
-        # Usar el rank de consenso para ordenar
-        # Mapear de vuelta a tiempo (usar promedio de medianas)
-        ensemble_median = all_medians.mean(axis=1)
+        all_medians = pd.concat(median_times.values(), axis=0)
+        ensemble_median = all_medians.groupby(
+            lambda x: x.rsplit('_', 1)[-1]
+        ).mean()
         
         # Para la curva de supervivencia
-        all_surv = pd.concat(survival_funcs.values(), axis=1)
-        ensemble_surv = all_surv.groupby(level=0).mean()
+        if survival_funcs:
+            all_times = []
+            for surv in survival_funcs.values():
+                all_times.extend(surv.index.tolist())
+            all_times = sorted(set(all_times))
+            
+            aligned_surv = []
+            for surv in survival_funcs.values():
+                aligned = surv.reindex(all_times, method='ffill')
+                aligned_surv.append(aligned)
+            
+            all_surv_concat = pd.concat(aligned_surv, axis=1)
+            ensemble_surv = all_surv_concat.groupby( #type:ignore
+                lambda x: x.rsplit('_', 1)[-1], axis=1
+            ).mean()
+        else:
+            ensemble_surv = pd.DataFrame()
         
         return ensemble_surv, ensemble_median
     
@@ -354,18 +535,24 @@ class EnsembleManager:
             
             model_key = f"{model.name}_{i}"
             
-            print(f"Survival function for {model_key}: {model.surv}")
-
+            print(f"Survival function for {model_key}:\n {model.surv}")
 
             # Obtener función de supervivencia
             if hasattr(model, 'surv') and model.surv is not None:
-                self.survival_funcs[model_key] = model.surv
+                # Renombrar columnas para incluir el nombre del modelo
+                surv_renamed = model.surv.copy()
+                surv_renamed.columns = [f"{model.name}_{col}" for col in surv_renamed.columns]
+                self.survival_funcs[model_key] = surv_renamed
             
-            if hasattr(model,'median_time') and model.median_time is not None:
+            # Obtener median time
+            if hasattr(model, 'median_time') and model.median_time is not None:
                 try:
                     median_df = model.median_time
                     if not median_df.empty:
-                        self.median_times[model_key] = median_df.iloc[:, 0]
+                        # Renombrar índice para incluir el nombre del modelo
+                        median_series = median_df.iloc[:, 0].copy()
+                        median_series.index = [f"{model.name}_{idx}" for idx in median_series.index]
+                        self.median_times[model_key] = median_series
                 except Exception as e:
                     st.warning(f"Error obteniendo la mediana de {model.name}: {e}")
 
@@ -382,6 +569,26 @@ class EnsembleManager:
         self.ensemble_surv, self.ensemble_median = self.strategy.combine_predictions(
             [], self.survival_funcs, self.median_times, self.c_indices
         )
+        
+        # Limpiar nombres de columnas del resultado
+        if not self.ensemble_surv.empty:
+            # Extraer solo el índice de empresa (remover nombre del modelo)
+            new_cols = []
+            seen = {}
+            for col in self.ensemble_surv.columns:
+                # Si la columna tiene formato "nombre_modelo_0", extraer solo el número
+                parts = col.rsplit('_', 1)
+                if len(parts) == 2 and parts[1].isdigit():
+                    base_col = parts[1]
+                    if base_col not in seen:
+                        seen[base_col] = 0
+                    seen[base_col] += 1
+                    new_cols.append(f"Empresa_{parts[1]}")
+                else:
+                    new_cols.append(col)
+            
+            self.ensemble_surv.columns = new_cols
+        
         return self.ensemble_surv, self.ensemble_median
     
     def plot_ensemble_survival(self) -> plt.Figure:
