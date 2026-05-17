@@ -82,6 +82,22 @@ if uploaded_file is not None:
 if st.session_state.input_dataset is not None:
     st.dataframe(st.session_state.input_dataset)
 
+st.markdown("## Cargar dataset de validación (opcional, para calcular c-index del ensemble)")
+
+validation_file = st.file_uploader("Choose validation file", type=["csv", "xlsx"], key="validation_file")
+if validation_file is not None:
+    if validation_file.type == "text/csv":
+        validation_df = pd.read_csv(validation_file)
+    elif validation_file.type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+        validation_df = pd.read_excel(validation_file)
+    else:
+        st.error("Unsupported file type. Please upload a CSV or Excel file.")
+        validation_df = None
+    st.session_state.validation_dataset = validation_df
+
+if st.session_state.get('validation_dataset') is not None:
+    st.dataframe(st.session_state.validation_dataset)
+
 # Configuración de los modelos
 st.markdown("## Configuración de Modelos")
 
@@ -204,6 +220,8 @@ if st.button("Generar Predicción de Ensamble"):
 
         try:
             ensemble_mgr = EnsembleManager(assembly_model)
+            if 'validation_dataset' in st.session_state:
+                ensemble_mgr.set_validation_data(st.session_state.validation_dataset)
             ensemble_mgr.fit(st.session_state.models)
             ensemble_surv, ensemble_median = ensemble_mgr.predict()
 
@@ -246,6 +264,12 @@ if st.session_state.ensemble_results is not None:
     
     st.markdown("**Información de la Estrategia:**")
     st.json(results['info'])
+    
+    ensemble_c_index = results['ensemble_mgr'].get_ensemble_c_index()
+    if ensemble_c_index is not None:
+        st.write(f"Índice de Concordancia del Ensemble = {ensemble_c_index:.6f}")
+    else:
+        st.write("Índice de Concordancia del Ensemble: No disponible (cargue un dataset de validación con el mismo número de filas que el dataset de predicción, y columnas 'time' y 'event')")
     
     # Botón para limpiar resultados si es necesario
     if st.button("Limpiar resultados del ensamble"):

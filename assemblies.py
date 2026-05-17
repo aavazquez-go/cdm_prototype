@@ -7,6 +7,7 @@ from scipy.stats import rankdata
 from sklearn.linear_model import LogisticRegression
 from typing import List, Dict, Tuple
 from settings import Model
+from pycox.evaluation import EvalSurv
 
 class EnsembleStrategy(ABC):
     """Clase base abstracta para estrategias de ensamble"""
@@ -520,6 +521,9 @@ class EnsembleManager:
         self.strategy = self.STRATEGIES[strategy_name]()
         self.ensemble_surv = None
         self.ensemble_median = None
+        self.ensemble_c_index = None
+        self.validation_durations = None
+        self.validation_events = None
     
     def fit(self, models: List[Model]) -> None:
         """Extrae predicciones de modelos"""
@@ -563,9 +567,20 @@ class EnsembleManager:
                     self.c_indices[model_key] = c_idx
                 except Exception as e:
                     st.warning(f"Error obteniendo c_index de {model.name}: {e}")
+        
+        st.write(f"c_indices recopilados: {self.c_indices}")
+    
+    def set_validation_data(self, df: pd.DataFrame) -> None:
+        """Establece el dataset de validación para calcular c-index del ensemble"""
+        if 'time' in df.columns and 'event' in df.columns:
+            self.validation_durations = df['time'].values
+            self.validation_events = df['event'].values
+        else:
+            st.warning("El dataset de validación debe tener columnas 'time' y 'event'")
     
     def predict(self) -> Tuple[pd.DataFrame, pd.Series]:
         """Genera predicción del ensamble"""
+        st.write(f"Generando ensemble con estrategia: {self.strategy.name}")
         self.ensemble_surv, self.ensemble_median = self.strategy.combine_predictions(
             [], self.survival_funcs, self.median_times, self.c_indices
         )
@@ -588,6 +603,21 @@ class EnsembleManager:
                     new_cols.append(col)
             
             self.ensemble_surv.columns = new_cols
+        
+        # Calcular c-index del ensemble si hay datos de validación
+        if self.validation_durations is not None and self.validation_events is not None and not self.ensemble_surv.empty:
+            n_individuals = self.ensemble_surv.shape[1]
+            if len(self.validation_durations) != n_individuals or len(self.validation_events) != n_individuals:
+                st.error(f"El dataset de validación debe tener el mismo número de filas ({n_individuals}) que el dataset de predicción.")
+                self.ensemble_c_index = None
+            else:
+                try:
+                    ev = EvalSurv(self.ensemble_surv, self.validation_durations, self.validation_events)
+                    self.ensemble_c_index = ev.concordance_td()
+                    st.write(f"c-index calculado para {self.strategy.name}: {self.ensemble_c_index}")
+                except Exception as e:
+                    st.warning(f"Error calculando c-index del ensemble: {e}")
+                    self.ensemble_c_index = None
         
         return self.ensemble_surv, self.ensemble_median
     
@@ -625,3 +655,7 @@ class EnsembleManager:
             "weights": self.strategy.get_weights(),
             "num_models": len(self.survival_funcs)
         }
+    
+    def get_ensemble_c_index(self) -> float | None:
+        """Retorna el índice de concordancia del ensamble si está disponible"""
+        return self.ensemble_c_index
