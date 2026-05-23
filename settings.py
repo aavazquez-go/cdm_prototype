@@ -19,7 +19,7 @@ import tempfile
 # Redirigir la carpeta de datos de pycox a /tmp (escribible en Streamlit Cloud)
 os.environ["PYCOX_DATA_DIR"] = os.path.join(tempfile.gettempdir(), "pycox_data")
 
-from pycox.models import CoxPH, CoxCC, CoxTime
+from pycox.models import CoxPH, CoxCC, CoxTime, DeepHitSingle
 from pycox.evaluation import EvalSurv
 from pycox.models.cox_time import MLPVanillaCoxTime
 
@@ -76,6 +76,19 @@ class Model(ABC):
     def concordance_index(self)-> float | None:
         pass
 
+    @staticmethod
+    def _infer_num_nodes(state_dict):
+        import re
+        blocks = set()
+        has_double_prefix = any('net.net' in k for k in state_dict)
+        for key in state_dict:
+            m = re.search(r'net(?:\.net)?\.(\d+)\.linear\.weight', key)
+            if m:
+                blocks.add(int(m.group(1)))
+        blocks = sorted(blocks)
+        prefix = 'net.net.' if has_double_prefix else 'net.'
+        return [state_dict[f'{prefix}{i}.linear.weight'].shape[0] for i in blocks]
+
 class DeepSurvModel(Model):
     instance_count = 0
     def __init__(self, tab_index = None):
@@ -84,14 +97,7 @@ class DeepSurvModel(Model):
         self.type = "DeepSurv"
         self.tab_index = tab_index
         self.instance_id = f"deepsurv_tab_{tab_index}" if tab_index is not None else "deepsurv_temp"
-        self.net  = tt.practical.MLPVanilla( #type: ignore
-            in_features=45, 
-            num_nodes=[32, 32], 
-            out_features = 1, 
-            batch_norm=True, 
-            dropout=0.1, 
-            output_bias=False
-        )
+        self.net = None
         self.preprocessing_file = None
         self.state_dict_file = None
         self.baseline_hazards_file = None
@@ -170,8 +176,17 @@ class DeepSurvModel(Model):
         if not isReady:
             return pd.DataFrame()
 
-        net = self.net
+        input_df = self.input_df
+        preprocessor = joblib.load(self.preprocessing_file)
         state_dict = torch.load(self.state_dict_file, weights_only=True) #type: ignore
+        X = preprocessor.transform(input_df).astype('float32')
+
+        net = self.net
+        if net is None:
+            in_features = X.shape[1]
+            num_nodes = DeepSurvModel._infer_num_nodes(state_dict)
+            net = tt.practical.MLPVanilla(in_features, num_nodes, 1, batch_norm=True, dropout=0.1, output_bias=False)
+            self.net = net
         net.load_state_dict(state_dict)
         model_loaded = CoxPH(net)
         # cargando el baseline hazards 
@@ -182,10 +197,7 @@ class DeepSurvModel(Model):
             baseline_hazards_=loaded_baseline_hazards
         )
         self.model_loaded = model_loaded
-        input_df = self.input_df
-        preprocessor = joblib.load(self.preprocessing_file)
-        X = preprocessor.transform(input_df).astype('float32')
-        self.preprocessed_input = pd.DataFrame(X, columns=input_df.columns) #type: ignore
+        self.preprocessed_input = pd.DataFrame(X, columns=preprocessor.get_feature_names_out()) #type: ignore
         surv = model_loaded.predict_surv_df(X)
         self.surv = surv
         # creando curva de supervivencia
@@ -319,8 +331,8 @@ class LifelinesCoxPHModel(Model):
         preprocessor = joblib.load(self.preprocessing_file)
         model_loaded = joblib.load(self.model_file)
         self.model_loaded = model_loaded
-        x_to_predict = preprocessor.fit_transform(self.input_df).astype('float32')
-        new_to_predict_df = pd.DataFrame(x_to_predict, columns=self.input_df.columns)
+        x_to_predict = preprocessor.transform(self.input_df).astype('float32')
+        new_to_predict_df = pd.DataFrame(x_to_predict, columns=preprocessor.get_feature_names_out())
         self.preprocessed_input = new_to_predict_df
         surv = model_loaded.predict_survival_function(new_to_predict_df)
         self.surv = surv
@@ -405,14 +417,7 @@ class CoxCCModel(Model):
         self.loaded_preprocessor = None
         self.loaded_baseline_hazards = None
         self.loaded_net_state_dict = None
-        self.net = tt.practical.MLPVanilla( #type: ignore
-            in_features=45, 
-            num_nodes=[32, 32], 
-            out_features = 1, 
-            batch_norm=True, 
-            dropout=0.1, 
-            output_bias=False
-        )
+        self.net = None
         self.preprocessed_input = None
         self.evaluation_file = None
         self.evaluation = None
@@ -491,9 +496,18 @@ class CoxCCModel(Model):
         loaded_baseline_hazards = joblib.load(self.baseline_hazards_file)
         loaded_model_net_state_dict = torch.load(self.state_dict_file)
 
-        net = self.net
-        net.load_state_dict(loaded_model_net_state_dict)
-        model_loaded = CoxCC(net, tt.optim.Adam) # type: ignore
+        in_features = loaded_preprocessor.transform(self.input_df.iloc[:1]).astype('float32').shape[1]
+        num_nodes = self._infer_num_nodes(loaded_model_net_state_dict)
+        self.net = tt.practical.MLPVanilla(
+            in_features=in_features,
+            num_nodes=num_nodes,
+            out_features=1,
+            batch_norm=True,
+            dropout=0.1,
+            output_bias=False
+        )
+        self.net.load_state_dict(loaded_model_net_state_dict)
+        model_loaded = CoxCC(self.net, tt.optim.Adam) # type: ignore
         
         # cargando el baseline hazards
         model_loaded.baseline_hazards_ = loaded_baseline_hazards
@@ -503,8 +517,7 @@ class CoxCCModel(Model):
         )
         
         X_preprocessed = loaded_preprocessor.transform(self.input_df).astype('float32')
-        # X_preprocessed_df = pd.DataFrame(X_preprocessed, columns = self.input_df.columns)
-        self.preprocessed_input = pd.DataFrame(X_preprocessed, columns = self.input_df.columns) # type: ignore
+        self.preprocessed_input = pd.DataFrame(X_preprocessed, columns=loaded_preprocessor.get_feature_names_out())
 
         surv = model_loaded.predict_surv_df(X_preprocessed)
         # print(f"Predicted survival values: {surv}")
@@ -600,12 +613,7 @@ class CoxTimeModel(Model):
         self.labtrans_file = None
         self.evaluation_file = None
         self.loaded_model = None
-        self.net = MLPVanillaCoxTime(
-            in_features = 45, 
-            num_nodes = [32, 32], 
-            batch_norm = True, 
-            dropout = 0.1
-        )
+        self.net = None
         self.state_dict = None
         self.loaded_baseline_hazards = None
         self.loaded_preprocessor = None
@@ -700,9 +708,14 @@ class CoxTimeModel(Model):
 
         # self.net = torch.load(self.net_file, weights_only= False, map_location='cpu', pickle_module=pickle) #type: ignore
         self.state_dict = torch.load(self.state_dict_file, weights_only=True) #type: ignore
+        self.loaded_preprocessor = joblib.load(self.preprocessing_file)
+        X_preprocessed = self.loaded_preprocessor.transform(self.input_df.iloc[:1]).astype('float32')
+        if self.net is None:
+            in_features = X_preprocessed.shape[1]
+            num_nodes = Model._infer_num_nodes(self.state_dict)
+            self.net = MLPVanillaCoxTime(in_features, num_nodes, batch_norm=True, dropout=0.1)
         self.net.load_state_dict(self.state_dict)
         self.loaded_labtrans = joblib.load(self.labtrans_file)
-        self.loaded_preprocessor = joblib.load(self.preprocessing_file)
         self.loaded_baseline_hazards = joblib.load(self.baseline_hazards_file)
 
 
@@ -792,6 +805,308 @@ class CoxTimeModel(Model):
                 self.evaluation = joblib.load(self.evaluation_file)
 
         self.c_index = self.evaluation.concordance_td()#type:ignore
+        return self.c_index
+
+    def get_survival_func(self):
+        return self.surv
+
+class DeepHitModel(Model):
+
+    def __init__(self, tab_index=None):
+        super().__init__()
+        self.type = "DeepHit"
+        self.instance_id = f"deephit_tab_{tab_index}" if tab_index is not None else "deephit_temp"
+        self.preprocessing_file = None
+        self.state_dict_file = None
+        self.labtrans_file = None
+        self.evaluation_file = None
+        self.preprocessed_input = None
+        self.evaluation = None
+
+    def show_ui(self):
+        st.markdown("### DeepHit")
+        preprocessing_file = st.file_uploader(
+            "Cargar archivo de preprocesamiento del modelo",
+            accept_multiple_files=False,
+            type="pkl",
+            key=f"deephit_preprocessing_file_uploader_{self.instance_id}"
+        )
+        if preprocessing_file:
+            st.session_state[f"{self.instance_id}_preprocessing_file"] = preprocessing_file
+        elif st.session_state.get(f"{self.instance_id}_preprocessing_file", None):
+            st.info(f"Archivo cargado: {st.session_state[f'{self.instance_id}_preprocessing_file'].name}")
+        self.preprocessing_file = st.session_state.get(f"{self.instance_id}_preprocessing_file", None)
+
+        state_dict_file = st.file_uploader(
+            "Cargar archivo de pesos del modelo PyTorch",
+            accept_multiple_files=False,
+            type="pt",
+            key=f"deephit_state_dict_file_uploader_{self.instance_id}"
+        )
+        if state_dict_file:
+            st.session_state[f"{self.instance_id}_state_dict_file"] = state_dict_file
+        self.state_dict_file = st.session_state.get(f"{self.instance_id}_state_dict_file", None)
+
+        labtrans_file = st.file_uploader(
+            "Cargar archivo de transformación de etiquetas (labtrans)",
+            accept_multiple_files=False,
+            type="pkl",
+            key=f"deephit_labtrans_file_uploader_{self.instance_id}"
+        )
+        if labtrans_file:
+            st.session_state[f"{self.instance_id}_labtrans_file"] = labtrans_file
+        self.labtrans_file = st.session_state.get(f"{self.instance_id}_labtrans_file", None)
+
+        evaluation_file = st.file_uploader(
+            "Cargar archivo de evaluación del modelo",
+            accept_multiple_files=False,
+            type="joblib",
+            key=f"deephit_evaluation_file_uploader_{self.instance_id}"
+        )
+        if evaluation_file:
+            st.session_state[f"{self.instance_id}_evaluation_file"] = evaluation_file
+        self.evaluation_file = st.session_state.get(f"{self.instance_id}_evaluation_file", None)
+
+    def predict(self) -> pd.DataFrame:
+        isReady = True
+        if self.state_dict_file is None:
+            st.warning("Por favor, cargue el archivo de pesos del modelo para continuar.")
+            isReady = False
+        if self.preprocessing_file is None:
+            st.warning("Por favor, cargue el archivo de preprocesamiento para continuar.")
+            isReady = False
+        if self.labtrans_file is None:
+            st.warning("Por favor, cargue el archivo de transformación de etiquetas (labtrans) para continuar.")
+            isReady = False
+        if self.evaluation_file is None:
+            st.warning("Por favor, cargue el archivo de evaluación para continuar.")
+            isReady = False
+        if self.input_df is None:
+            st.warning("Por favor, cargue el archivo con el conjunto de datos de entrada para continuar.")
+            isReady = False
+        if not isReady:
+            return pd.DataFrame()
+
+        loaded_preprocessor = joblib.load(self.preprocessing_file)
+        loaded_labtrans = joblib.load(self.labtrans_file)
+        state_dict = torch.load(self.state_dict_file, weights_only=True)
+
+        X = loaded_preprocessor.transform(self.input_df).astype('float32')
+        in_features = X.shape[1]
+        out_features = loaded_labtrans.out_features
+
+        if any(k.startswith('net.net.') for k in state_dict):
+            state_dict = {k.replace('net.net.', 'net.', 1): v for k, v in state_dict.items()}
+
+        net = tt.practical.MLPVanilla(
+            in_features=in_features,
+            num_nodes=Model._infer_num_nodes(state_dict),
+            out_features=out_features,
+            batch_norm=True,
+            dropout=0.1
+        )
+        net.load_state_dict(state_dict)
+        net.eval()
+
+        self.loaded_model = DeepHitSingle(
+            net, tt.optim.Adam, alpha=0.2, sigma=0.1,
+            duration_index=loaded_labtrans.cuts
+        )
+
+        surv = self.loaded_model.interpolate(10).predict_surv_df(X)
+        self.surv = surv
+        self.surv_curve = self._create_survival_curve()
+        self.evaluation = joblib.load(self.evaluation_file)
+        self.preprocessed_input = pd.DataFrame(X, columns=loaded_preprocessor.get_feature_names_out())
+        return surv
+
+    def model_details(self) -> None:
+        st.json({
+            "Name": self.name,
+            "Type": self.type,
+            "Preprocessing File": self.preprocessing_file.name if self.preprocessing_file else "Not uploaded",
+            "State Dict File": self.state_dict_file.name if self.state_dict_file else "Not uploaded",
+            "Labtrans File": self.labtrans_file.name if self.labtrans_file else "Not uploaded",
+        })
+
+    def _create_survival_curve(self):
+        fig, ax = plt.subplots(figsize=(10, 6))
+        for i in range(self.surv.shape[1]):
+            ax.step(self.surv.index, self.surv.iloc[:, i], where='post', label=f'Empresa {i+1}')
+
+        plt.ylabel('Probabilidad de supervivencia')
+        plt.xlabel('Tiempo')
+        plt.title('Curvas de supervivencia predichas (modelo DeepHit)')
+        plt.legend()
+        plt.grid(True)
+        plt.ylim(0, 1.05)
+        return fig
+
+    def get_survival_curve(self):
+        return self.surv_curve
+
+    def _predict_median_survival_time_single(self, surv):
+        times = surv.index.values
+        s = surv.iloc[:, 0].values
+        idx = np.where(s <= 0.5)[0]
+        return times[idx[0]] if len(idx) > 0 else np.inf
+
+    def predict_median_survival_time(self) -> DataFrame:
+        if self.surv is None:
+            st.warning("Debe predecir primero")
+            return pd.DataFrame()
+        emp = {}
+        for i in range(self.surv.shape[1]):
+            median_time = self._predict_median_survival_time_single(self.surv[[i]])
+            emp[f"Caso {i+1}"] = median_time
+        self.median_time = pd.DataFrame.from_dict(emp, orient='index', columns=['Median Survival Time'])
+        return self.median_time
+
+    def concordance_index(self) -> float | None:
+        if self.evaluation is None:
+            if self.evaluation_file is None:
+                st.warning("Por favor, cargue el archivo de evaluación para continuar.")
+                return None
+            else:
+                self.evaluation = joblib.load(self.evaluation_file)
+        self.c_index = float(self.evaluation.concordance_td())
+        return self.c_index
+
+    def get_survival_func(self):
+        return self.surv
+
+
+class RSFModel(Model):
+
+    def __init__(self, tab_index=None):
+        super().__init__()
+        self.type = "RSF"
+        self.instance_id = f"rsf_tab_{tab_index}" if tab_index is not None else "rsf_temp"
+        self.preprocessing_file = None
+        self.model_file = None
+        self.evaluation_file = None
+        self.model_loaded = None
+        self.preprocessed_input = None
+        self.evaluation = None
+
+    def show_ui(self):
+        st.markdown("### Random Survival Forest (RSF)")
+        preprocessing_file = st.file_uploader(
+            "Cargar archivo de preprocesamiento del modelo",
+            accept_multiple_files=False,
+            type="pkl",
+            key=f"rsf_preprocessing_file_uploader_{self.instance_id}"
+        )
+        if preprocessing_file:
+            st.session_state[f"{self.instance_id}_preprocessing_file"] = preprocessing_file
+        elif st.session_state.get(f"{self.instance_id}_preprocessing_file", None):
+            st.info(f"Archivo cargado: {st.session_state[f'{self.instance_id}_preprocessing_file'].name}")
+        self.preprocessing_file = st.session_state.get(f"{self.instance_id}_preprocessing_file", None)
+
+        model_file = st.file_uploader(
+            "Cargar archivo del modelo RSF entrenado",
+            accept_multiple_files=False,
+            type="joblib",
+            key=f"rsf_model_file_uploader_{self.instance_id}"
+        )
+        if model_file:
+            st.session_state[f"{self.instance_id}_model_file"] = model_file
+        self.model_file = st.session_state.get(f"{self.instance_id}_model_file", None)
+
+        evaluation_file = st.file_uploader(
+            "Cargar archivo de evaluación del modelo",
+            accept_multiple_files=False,
+            type="joblib",
+            key=f"rsf_evaluation_file_uploader_{self.instance_id}"
+        )
+        if evaluation_file:
+            st.session_state[f"{self.instance_id}_evaluation_file"] = evaluation_file
+        self.evaluation_file = st.session_state.get(f"{self.instance_id}_evaluation_file", None)
+
+    def predict(self) -> pd.DataFrame:
+        isReady = True
+        if self.model_file is None:
+            st.warning("Por favor, cargue el archivo del modelo RSF entrenado para continuar.")
+            isReady = False
+        if self.preprocessing_file is None:
+            st.warning("Por favor, cargue el archivo de preprocesamiento para continuar.")
+            isReady = False
+        if self.evaluation_file is None:
+            st.warning("Por favor, cargue el archivo de evaluación para continuar.")
+            isReady = False
+        if self.input_df is None:
+            st.warning("Por favor, cargue el archivo con el conjunto de datos de entrada para continuar.")
+            isReady = False
+        if not isReady:
+            return pd.DataFrame()
+
+        loaded_preprocessor = joblib.load(self.preprocessing_file)
+        self.model_loaded = joblib.load(self.model_file)
+
+        X = loaded_preprocessor.transform(self.input_df).astype('float32')
+        self.preprocessed_input = pd.DataFrame(X, columns=loaded_preprocessor.get_feature_names_out())
+
+        surv_array = self.model_loaded.predict_survival_function(X, return_array=True)
+        surv = pd.DataFrame(surv_array.T, index=self.model_loaded.unique_times_)
+        self.surv = surv
+        self.surv_curve = self._create_survival_curve()
+        self.evaluation = joblib.load(self.evaluation_file)
+        return surv
+
+    def model_details(self) -> None:
+        st.json({
+            "Name": self.name,
+            "Type": self.type,
+            "Preprocessing File": self.preprocessing_file.name if self.preprocessing_file else "Not uploaded",
+            "Model File": self.model_file.name if self.model_file else "Not uploaded",
+        })
+
+    def _create_survival_curve(self):
+        fig, ax = plt.subplots(figsize=(10, 6))
+        for i in range(self.surv.shape[1]):
+            ax.step(self.surv.index, self.surv.iloc[:, i], where='post', label=f'Empresa {i+1}')
+
+        plt.ylabel('Probabilidad de supervivencia')
+        plt.xlabel('Tiempo')
+        plt.title('Curvas de supervivencia predichas (modelo RSF)')
+        plt.legend()
+        plt.grid(True)
+        plt.ylim(0, 1.05)
+        return fig
+
+    def get_survival_curve(self):
+        return self.surv_curve
+
+    def _predict_median_survival_time_single(self, surv):
+        times = surv.index.values
+        s = surv.iloc[:, 0].values
+        idx = np.where(s <= 0.5)[0]
+        return times[idx[0]] if len(idx) > 0 else np.inf
+
+    def predict_median_survival_time(self) -> DataFrame:
+        if self.surv is None:
+            st.warning("Debe predecir primero")
+            return pd.DataFrame()
+        emp = {}
+        for i in range(self.surv.shape[1]):
+            median_time = self._predict_median_survival_time_single(self.surv[[i]])
+            emp[f"Caso {i+1}"] = median_time
+        self.median_time = pd.DataFrame.from_dict(emp, orient='index', columns=['Median Survival Time'])
+        return self.median_time
+
+    def concordance_index(self) -> float | None:
+        if self.evaluation is None:
+            if self.evaluation_file is None:
+                st.warning("Por favor, cargue el archivo de evaluación para continuar.")
+                return None
+            else:
+                self.evaluation = joblib.load(self.evaluation_file)
+        if isinstance(self.evaluation, dict):
+            self.c_index = self.evaluation.get('c_index', None)
+        elif hasattr(self.evaluation, 'concordance_td'):
+            self.c_index = float(self.evaluation.concordance_td())
+        else:
+            self.c_index = float(self.evaluation)
         return self.c_index
 
     def get_survival_func(self):

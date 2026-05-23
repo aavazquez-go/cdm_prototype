@@ -14,6 +14,9 @@ SEED = 1234
 torch.manual_seed(123)
 np.random.seed(SEED)
 
+# Re-exportar el pipeline de preprocesamiento para datos crudos
+from .preprocessing_pipeline import preprocess_raw_data, validate_columns, FEATURE_EXCLUDE
+
 
 def load_datasets(train_path: str, test_path: str):
     df_train = pd.read_csv(train_path)

@@ -1,14 +1,21 @@
 import streamlit as st
 import pandas as pd
-from settings import Model, DeepSurvModel, LifelinesCoxPHModel, CoxCCModel, CoxTimeModel
+from settings import Model, DeepSurvModel, LifelinesCoxPHModel, CoxCCModel, CoxTimeModel, DeepHitModel, RSFModel
 from assemblies import EnsembleManager
+from scripts.preprocessing_pipeline import preprocess_raw_data
 
 # Inicializar
 if "num_modelos" not in st.session_state:
-    st.session_state.num_modelos = 3
+    st.session_state.num_modelos = 4
 
 if 'input_dataset' not in st.session_state:
     st.session_state.input_dataset = None
+
+if 'preprocessed_dataset' not in st.session_state:
+    st.session_state.preprocessed_dataset = None
+
+if 'preprocessing_applied' not in st.session_state:
+    st.session_state.preprocessing_applied = False
 
 # Inicializar resultados de predicción por modelo
 if 'prediction_results' not in st.session_state:
@@ -32,6 +39,10 @@ def model_factory(model_type, tab_index = None)-> Model| None:
         return CoxCCModel(tab_index=tab_index)
     elif model_type == "CoxTime":
         return CoxTimeModel(tab_index=tab_index)
+    elif model_type == "DeepHit":
+        return DeepHitModel(tab_index=tab_index)
+    elif model_type == "RSF":
+        return RSFModel(tab_index=tab_index)
     else:
         return None
 
@@ -51,8 +62,8 @@ with st.sidebar:
     st.markdown("### Modelos para usar")
     model_types = st.multiselect(
         "Selecciona los tipos de modelos a usar",
-        options=["Lifelines-CoxPH", "DeepSurv", "CoxCC", "CoxTime"],
-        default=["Lifelines-CoxPH", "DeepSurv", "CoxCC", "CoxTime"]
+        options=["Lifelines-CoxPH", "DeepSurv", "CoxCC", "CoxTime", "DeepHit", "RSF"],
+        default=["Lifelines-CoxPH", "DeepSurv", "CoxCC", "CoxTime", "DeepHit", "RSF"]
     )
     st.markdown("---")
     st.markdown("### Modelos de ensamble")
@@ -81,6 +92,46 @@ if uploaded_file is not None:
 
 if st.session_state.input_dataset is not None:
     st.dataframe(st.session_state.input_dataset)
+
+    # ── Preprocessing pipeline ─────────────────────────────────────
+    st.markdown("## Preprocesamiento de datos crudos")
+
+    df_raw = st.session_state.input_dataset
+    cat_cols_in_data = {'N3', 'N4', 'N5', 'N8', 'N9', 'N10', 'N11', 'N15'} & set(df_raw.columns)
+    has_categoricals = any(df_raw[c].dtype == 'object' for c in cat_cols_in_data)
+
+    if has_categoricals:
+        st.info("Se detectaron columnas categóricas. Se recomienda aplicar el pipeline de preprocesamiento.")
+
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        run_prepro = st.button("Aplicar preprocesamiento", type="primary")
+    with col2:
+        if st.session_state.preprocessing_applied:
+            st.success("✅ Preprocesamiento aplicado correctamente")
+
+    if run_prepro:
+        with st.spinner("Ejecutando MICE imputation + One-Hot Encoding + Yeo-Johnson..."):
+            try:
+                df_proc = preprocess_raw_data(df_raw)
+                st.session_state.preprocessed_dataset = df_proc
+                st.session_state.preprocessing_applied = True
+                st.success(f"✅ Datos preprocesados: {df_proc.shape[1]} features, {df_proc.shape[0]} filas")
+            except Exception as e:
+                st.error(f"Error en el preprocesamiento: {e}")
+
+    if st.session_state.preprocessing_applied:
+        st.dataframe(st.session_state.preprocessed_dataset)
+
+        csv = st.session_state.preprocessed_dataset.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="📥 Descargar datos preprocesados (CSV)",
+            data=csv,
+            file_name="datos_preprocesados.csv",
+            mime="text/csv",
+        )
+
+    st.markdown("---")
 
 st.markdown("## Cargar dataset de validación (opcional, para calcular c-index del ensemble)")
 
@@ -148,7 +199,9 @@ for i, tab in enumerate(tabs):
 
         model = st.session_state.models[i]
         if model is not None:
-            if st.session_state.input_dataset is not None:
+            if st.session_state.preprocessed_dataset is not None:
+                model.set_input_df(st.session_state.preprocessed_dataset)
+            elif st.session_state.input_dataset is not None:
                 model.set_input_df(st.session_state.input_dataset)
             model.show_ui()
             st.write("Detalles del modelo:")
